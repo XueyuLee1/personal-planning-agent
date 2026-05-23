@@ -1,0 +1,3 @@
+gradio
+
+# json is part of the Python standard library; no extra dependency is needed.
