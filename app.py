@@ -1438,11 +1438,19 @@ def find_available_port(start: int = 7860, end: int = 8999) -> int:
 
 def create_demo() -> gr.Blocks:
     with gr.Blocks(title="Personal Planning Agent") as interface:
-        gr.Markdown("# Personal Planning Agent")
         gr.Markdown(
-            "A rule-based prototype for reflective, multi-turn behavioural workflow analysis."
+            """
+            <div class="app-header">
+              <p class="eyebrow">Rule-based planning calibration prototype</p>
+              <h1>Personal Planning Agent</h1>
+              <p class="subtitle">Turn available time, candidate tasks, and past behavior into a realistic next-session plan.</p>
+            </div>
+            """
         )
         with gr.Tab("Behavioral Workflow"):
+            gr.Markdown(
+                "Compare a plan with what actually happened, then save the session as planning history."
+            )
             with gr.Row():
                 planned_input = gr.Textbox(
                     label="Planned behaviour",
@@ -1463,11 +1471,17 @@ def create_demo() -> gr.Blocks:
             )
 
         with gr.Tab("Personal Planning Agent"):
-            available_minutes = gr.Number(
-                label="Available minutes",
-                value=120,
-                precision=0,
+            gr.Markdown(
+                "Build a task-level plan with protected buffer, selected tasks, deferred tasks, and plan confidence."
             )
+            with gr.Row():
+                available_minutes = gr.Number(
+                    label="Available minutes",
+                    value=120,
+                    precision=0,
+                    scale=1,
+                )
+                generate_plan_button = gr.Button("Generate Plan", variant="primary", scale=1)
             task_table = gr.Dataframe(
                 headers=["task_name", "estimated_minutes", "importance", "urgency"],
                 datatype=["str", "number", "number", "number"],
@@ -1483,7 +1497,6 @@ def create_demo() -> gr.Blocks:
                 label="Candidate tasks",
                 interactive=True,
             )
-            generate_plan_button = gr.Button("Generate Plan", variant="primary")
             plan_report = gr.Markdown(label="Personal Planning Report")
             plan_state = gr.State({})
             generate_plan_button.click(
