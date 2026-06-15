@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 history.json
+.ipynb_checkpoints/
+codex_instruction_final.md

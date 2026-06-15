@@ -10,7 +10,9 @@ from typing import List
 def load_history(file_path: str) -> list:
     """Load session history from disk, falling back to an empty list.
 
-    Each valid record is expected to contain at least a score and patterns field.
+    New session records contain structured planning fields, while older records
+    may contain only score and patterns. Both formats are kept for backward
+    compatibility.
     Corrupted or non-list files are treated as empty memory so the app can keep
     running during a demo.
     """
@@ -27,13 +29,14 @@ def load_history(file_path: str) -> list:
     if not isinstance(history, list):
         return []
 
-    return [
-        record
-        for record in history
-        if isinstance(record, dict)
-        and "score" in record
-        and "patterns" in record
-    ]
+    valid_records = []
+    for record in history:
+        if not isinstance(record, dict):
+            continue
+        if "score" not in record or "patterns" not in record:
+            continue
+        valid_records.append(record)
+    return valid_records
 
 
 def save_history(file_path: str, history: List[dict]) -> None:
