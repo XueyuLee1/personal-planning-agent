@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,6 +93,22 @@ class DiagnosticTests(unittest.TestCase):
             loaded = temporal_memory.load_history(history_file.name)
 
         self.assertEqual(loaded, legacy_records)
+
+    def test_load_history_keeps_generated_plan_records(self):
+        with tempfile.NamedTemporaryFile() as history_file:
+            records = [
+                {
+                    "record_type": "task_level_plan",
+                    "plan_id": "P001",
+                    "selected_tasks": [],
+                    "patterns": ["TaskLevelPlan"],
+                }
+            ]
+
+            temporal_memory.save_history(history_file.name, records)
+            loaded = temporal_memory.load_history(history_file.name)
+
+        self.assertEqual(loaded, records)
 
     def test_build_session_record_contains_structured_fields(self):
         observation = app.ObservationLayer.collect(
@@ -813,6 +830,314 @@ class DiagnosticTests(unittest.TestCase):
         self.assertIn("Personal Planning Report", report)
         self.assertIn("planned_tasks", state)
         self.assertIn("planned_minutes", state)
+        self.assertIn("plan_confidence", state)
+
+    def test_generated_plan_is_saved_to_history(self):
+        original_history_file = app.HISTORY_FILE
+
+        with tempfile.NamedTemporaryFile() as history_file:
+            app.HISTORY_FILE = history_file.name
+            _report, state = app.planning_agent_with_state(
+                120,
+                [
+                    ["STA2001", 60, 5, 5],
+                    ["GRE", 40, 4, 4],
+                ],
+            )
+            loaded = temporal_memory.load_history(history_file.name)
+            app.HISTORY_FILE = original_history_file
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0]["record_type"], "task_level_plan")
+        self.assertEqual(loaded[0]["plan_id"], state["plan_id"])
+        self.assertIn("selected_tasks", loaded[0])
+        self.assertIn("deferred_tasks", loaded[0])
+
+    def test_user_profile_uses_plan_outcome_records(self):
+        history = [
+            {
+                "record_type": "plan_outcome",
+                "planned_tasks": ["STA2001", "GRE"],
+                "completed_tasks": ["STA2001"],
+                "completion_rate": 0.5,
+                "score": 50,
+                "patterns": ["PlanOutcomeRecord"],
+            }
+        ]
+
+        profile = app.build_user_profile(history)
+
+        self.assertEqual(profile.total_sessions, 1)
+        self.assertAlmostEqual(profile.average_planned_tasks, 2.0)
+        self.assertAlmostEqual(profile.average_actual_tasks, 1.0)
+        self.assertAlmostEqual(profile.average_completion_rate, 0.5)
+
+    def test_history_trend_summary_reports_recent_outcomes(self):
+        history = [
+            {
+                "record_type": "task_level_plan",
+                "plan_id": "P001",
+                "patterns": ["TaskLevelPlan"],
+            },
+            {
+                "record_type": "plan_outcome",
+                "planned_minutes": 100,
+                "actual_minutes": 80,
+                "completion_rate": 0.5,
+                "interruption_count": 2,
+                "task_switch_count": 3,
+                "fatigue_level": 4,
+                "patterns": ["PlanOutcomeRecord"],
+            },
+        ]
+
+        summary = app.generate_history_trend_summary(history)
+
+        self.assertIn("Generated plans: 1", summary)
+        self.assertIn("Recorded outcomes: 1", summary)
+        self.assertIn("Recent outcome completion rate: 50%", summary)
+
+    def test_outcome_trend_reduces_work_budget_after_repeated_low_completion(self):
+        trend = app.build_outcome_trend(
+            [
+                {
+                    "record_type": "plan_outcome",
+                    "planned_minutes": 100,
+                    "actual_minutes": 40,
+                    "completion_rate": 0.4,
+                    "interruption_count": 4,
+                    "task_switch_count": 6,
+                    "fatigue_level": 4,
+                    "patterns": ["PlanOutcomeRecord"],
+                }
+                for _index in range(3)
+            ]
+        )
+
+        adjustment = app.TaskPlanningEngine.adjust_work_minutes_by_trend(100, trend)
+
+        self.assertLess(adjustment["work_minutes"], 100)
+        self.assertIn("reduced", adjustment["adjustment_note"])
+
+    def test_task_level_plan_uses_outcome_trend_adjustment(self):
+        trend = app.build_outcome_trend(
+            [
+                {
+                    "record_type": "plan_outcome",
+                    "planned_minutes": 100,
+                    "actual_minutes": 40,
+                    "completion_rate": 0.4,
+                    "interruption_count": 4,
+                    "task_switch_count": 6,
+                    "fatigue_level": 4,
+                    "patterns": ["PlanOutcomeRecord"],
+                }
+                for _index in range(3)
+            ]
+        )
+        capacity = app.CapacityEstimate(
+            estimated_task_capacity=3,
+            reliable_task_range="2-3 tasks",
+            confidence="high",
+            basis="test",
+            risk_notes=[],
+        )
+
+        plan = app.TaskPlanningEngine.generate_task_level_plan(
+            120,
+            [
+                app.CandidateTask("Task A", 40, 5, 5),
+                app.CandidateTask("Task B", 40, 4, 4),
+                app.CandidateTask("Task C", 40, 3, 3),
+            ],
+            capacity,
+            trend,
+        )
+
+        self.assertLess(plan.work_minutes, 102)
+        self.assertTrue(any("reduced" in risk for risk in plan.planning_risks))
+
+    def test_history_dashboard_contains_profile_and_trend(self):
+        original_history_file = app.HISTORY_FILE
+
+        with tempfile.NamedTemporaryFile() as history_file:
+            app.HISTORY_FILE = history_file.name
+            temporal_memory.save_history(
+                history_file.name,
+                [
+                    {
+                        "record_type": "plan_outcome",
+                        "planned_tasks": ["A", "B"],
+                        "completed_tasks": ["A"],
+                        "planned_minutes": 100,
+                        "actual_minutes": 70,
+                        "completion_rate": 0.5,
+                        "interruption_count": 1,
+                        "task_switch_count": 2,
+                        "fatigue_level": 3,
+                        "score": 50,
+                        "patterns": ["PlanOutcomeRecord"],
+                    }
+                ],
+            )
+            dashboard = app.generate_history_dashboard()
+            app.HISTORY_FILE = original_history_file
+
+        self.assertIn("Planning History Dashboard", dashboard)
+        self.assertIn("Outcome Trend", dashboard)
+        self.assertIn("User Profile", dashboard)
+
+    def test_llm_reflection_agent_falls_back_without_deepseek_api_key(self):
+        original_provider = os.environ.get("LLM_PROVIDER")
+        original_api_key = os.environ.pop("DEEPSEEK_API_KEY", None)
+        os.environ["LLM_PROVIDER"] = "deepseek"
+        plan = app.TaskLevelPlan(
+            available_minutes=120,
+            work_minutes=102,
+            buffer_minutes=18,
+            selected_tasks=[
+                app.TaskPlanItem("STA2001", 60, 1, "Selected", False)
+            ],
+            deferred_tasks=[],
+            planning_risks=["No major planning risks detected."],
+            plan_confidence="low",
+        )
+        profile = app.UserProfile(
+            total_sessions=0,
+            average_score=None,
+            average_planned_tasks=None,
+            average_actual_tasks=None,
+            average_completion_rate=None,
+            overplanning_frequency=None,
+            common_patterns=[],
+            recent_score_trend="not enough data",
+        )
+        capacity = app.CapacityEstimate(
+            estimated_task_capacity=None,
+            reliable_task_range="not enough data",
+            confidence="low",
+            basis="test",
+            risk_notes=["not enough data"],
+        )
+        trend = app.build_outcome_trend([])
+
+        reflection = app.LLMReflectionAgent.generate(profile, capacity, trend, plan)
+
+        if original_api_key is not None:
+            os.environ["DEEPSEEK_API_KEY"] = original_api_key
+        if original_provider is not None:
+            os.environ["LLM_PROVIDER"] = original_provider
+        else:
+            os.environ.pop("LLM_PROVIDER", None)
+        self.assertEqual(reflection.source, "rule_based_fallback")
+        self.assertEqual(reflection.provider, "deepseek")
+        self.assertIn("DEEPSEEK_API_KEY", reflection.error)
+        self.assertTrue(reflection.reflection)
+
+    def test_deepseek_chat_completion_text_extraction(self):
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"reflection":"a","risk_explanation":"b","next_action":"c","follow_up_question":"d"}'
+                    }
+                }
+            ]
+        }
+
+        text = app.LLMReflectionAgent._extract_chat_completion_text(payload)
+
+        self.assertIn('"reflection"', text)
+
+    def test_invalid_llm_provider_falls_back_to_deepseek(self):
+        original_provider = os.environ.get("LLM_PROVIDER")
+        original_api_key = os.environ.pop("DEEPSEEK_API_KEY", None)
+        os.environ["LLM_PROVIDER"] = "unknown-provider"
+        plan = app.TaskLevelPlan(
+            available_minutes=60,
+            work_minutes=51,
+            buffer_minutes=9,
+            selected_tasks=[app.TaskPlanItem("Task A", 30, 1, "Selected", False)],
+            deferred_tasks=[],
+            planning_risks=["No major planning risks detected."],
+            plan_confidence="low",
+        )
+        profile = app.UserProfile(
+            total_sessions=0,
+            average_score=None,
+            average_planned_tasks=None,
+            average_actual_tasks=None,
+            average_completion_rate=None,
+            overplanning_frequency=None,
+            common_patterns=[],
+            recent_score_trend="not enough data",
+        )
+        capacity = app.CapacityEstimate(
+            estimated_task_capacity=None,
+            reliable_task_range="not enough data",
+            confidence="low",
+            basis="test",
+            risk_notes=["not enough data"],
+        )
+
+        reflection = app.LLMReflectionAgent.generate(
+            profile, capacity, app.build_outcome_trend([]), plan
+        )
+
+        if original_provider is not None:
+            os.environ["LLM_PROVIDER"] = original_provider
+        else:
+            os.environ.pop("LLM_PROVIDER", None)
+        if original_api_key is not None:
+            os.environ["DEEPSEEK_API_KEY"] = original_api_key
+
+        self.assertEqual(reflection.provider, "deepseek")
+        self.assertEqual(reflection.source, "rule_based_fallback")
+
+    def test_plan_report_contains_llm_reflection_section(self):
+        reflection = app.LLMReflection(
+            enabled=True,
+            provider="deepseek",
+            model="test-model",
+            source="rule_based_fallback",
+            reflection="Plan keeps the workload small.",
+            risk_explanation="Not enough historical data.",
+            next_action="Start with task one.",
+            follow_up_question="What blocked execution?",
+            error="DEEPSEEK_API_KEY is not set.",
+        )
+        plan = app.TaskLevelPlan(
+            available_minutes=120,
+            work_minutes=102,
+            buffer_minutes=18,
+            selected_tasks=[
+                app.TaskPlanItem("STA2001", 60, 1, "Selected", False)
+            ],
+            deferred_tasks=[],
+            planning_risks=["No major planning risks detected."],
+            plan_confidence="low",
+        )
+
+        report = app.generate_plan_report_with_history(plan, "No history.", reflection)
+
+        self.assertIn("LLM Reflection Agent", report)
+        self.assertIn("rule_based_fallback", report)
+        self.assertIn("Plan keeps the workload small.", report)
+
+    def test_planning_agent_can_disable_llm_reflection(self):
+        original_history_file = app.HISTORY_FILE
+
+        with tempfile.NamedTemporaryFile() as history_file:
+            app.HISTORY_FILE = history_file.name
+            report, _state = app.planning_agent_with_state(
+                120,
+                [["STA2001", 60, 5, 5]],
+                enable_llm_reflection=False,
+            )
+            app.HISTORY_FILE = original_history_file
+
+        self.assertIn("LLM Reflection Agent", report)
+        self.assertIn("disabled", report)
 
     def test_progress_bar_for_score_50_has_ten_filled_segments(self):
         progress_bar = app.build_progress_bar(50)

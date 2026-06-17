@@ -5,3 +5,5 @@ __pycache__/
 history.json
 .ipynb_checkpoints/
 codex_instruction_final.md
+.env
+.env.local

@@ -6,182 +6,35 @@ rule-based analysis into agent-inspired workflow layers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 import socket
 from typing import Dict, Iterable, List, Optional
 
 import gradio as gr
 
+from llm_reflection import LLMReflectionAgent, format_llm_reflection
+from planning_models import (
+    CandidateTask,
+    CapacityEstimate,
+    DeferredTask,
+    DiagnosticResult,
+    LLMReflection,
+    Observation,
+    OutcomeTrend,
+    PlanOutcomeRecord,
+    PlanningRecommendation,
+    ScoredTask,
+    SessionRecord,
+    TaskLevelPlan,
+    TaskPlanItem,
+    TaskSelectionResult,
+    UserProfile,
+)
 from temporal_memory import load_history, save_history
 
 
 HISTORY_FILE = "history.json"
 history_memory: List[Dict[str, object]] = []
-
-
-@dataclass(frozen=True)
-class Observation:
-    planned_text: str
-    actual_text: str
-    planned_tasks: List[str]
-    actual_tasks: List[str]
-    planned_task_count: int
-    actual_task_count: int
-    distraction_hits: List[str]
-    execution_ratio: float
-    shared_terms_ratio: float
-
-
-@dataclass(frozen=True)
-class DiagnosticResult:
-    pattern_name: str
-    score_delta: int
-    reasoning: str
-    reflection: str
-    suggestion: str
-
-
-@dataclass(frozen=True)
-class SessionRecord:
-    session_id: str
-    created_at: str
-    planned_text: str
-    actual_text: str
-    planned_tasks: List[str]
-    actual_tasks: List[str]
-    planned_task_count: int
-    actual_task_count: int
-    score: int
-    patterns: List[str]
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "session_id": self.session_id,
-            "created_at": self.created_at,
-            "planned_text": self.planned_text,
-            "actual_text": self.actual_text,
-            "planned_tasks": self.planned_tasks,
-            "actual_tasks": self.actual_tasks,
-            "planned_task_count": self.planned_task_count,
-            "actual_task_count": self.actual_task_count,
-            "score": self.score,
-            "patterns": self.patterns,
-        }
-
-
-@dataclass(frozen=True)
-class UserProfile:
-    total_sessions: int
-    average_score: Optional[float]
-    average_planned_tasks: Optional[float]
-    average_actual_tasks: Optional[float]
-    average_completion_rate: Optional[float]
-    overplanning_frequency: Optional[float]
-    common_patterns: List[str]
-    recent_score_trend: str
-
-
-@dataclass(frozen=True)
-class CapacityEstimate:
-    estimated_task_capacity: Optional[int]
-    reliable_task_range: str
-    confidence: str
-    basis: str
-    risk_notes: List[str]
-
-
-@dataclass(frozen=True)
-class PlanningRecommendation:
-    recommended_task_count: int
-    recommended_tasks: List[str]
-    buffer_policy: str
-    success_probability: int
-    rationale: str
-    risk_warnings: List[str]
-
-
-@dataclass(frozen=True)
-class CandidateTask:
-    task_name: str
-    estimated_minutes: int
-    importance: int
-    urgency: int
-
-
-@dataclass(frozen=True)
-class ScoredTask:
-    task: CandidateTask
-    priority_score: float
-    feasibility_score: float
-    final_score: float
-
-
-@dataclass(frozen=True)
-class TaskSelectionResult:
-    selected_tasks: List[CandidateTask]
-    deferred_tasks: List[CandidateTask]
-
-
-@dataclass(frozen=True)
-class TaskPlanItem:
-    task_name: str
-    allocated_minutes: int
-    order: int
-    reason: str
-    is_partial: bool
-
-
-@dataclass(frozen=True)
-class DeferredTask:
-    task_name: str
-    estimated_minutes: int
-    defer_type: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class TaskLevelPlan:
-    available_minutes: int
-    work_minutes: int
-    buffer_minutes: int
-    selected_tasks: List[TaskPlanItem]
-    deferred_tasks: List[DeferredTask]
-    planning_risks: List[str]
-    plan_confidence: str
-
-
-@dataclass(frozen=True)
-class PlanOutcomeRecord:
-    plan_id: str
-    created_at: str
-    planned_tasks: List[str]
-    planned_minutes: int
-    completed_tasks: List[str]
-    actual_minutes: int
-    interruption_count: int
-    task_switch_count: int
-    fatigue_level: int
-    completion_rate: float
-    notes: str
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "record_type": "plan_outcome",
-            "plan_id": self.plan_id,
-            "created_at": self.created_at,
-            "planned_tasks": self.planned_tasks,
-            "planned_minutes": self.planned_minutes,
-            "completed_tasks": self.completed_tasks,
-            "actual_minutes": self.actual_minutes,
-            "interruption_count": self.interruption_count,
-            "task_switch_count": self.task_switch_count,
-            "fatigue_level": self.fatigue_level,
-            "completion_rate": self.completion_rate,
-            "notes": self.notes,
-            "score": int(round(self.completion_rate * 100)),
-            "patterns": ["PlanOutcomeRecord"],
-        }
 
 
 class ObservationLayer:
@@ -507,11 +360,21 @@ def build_user_profile(history: List[Dict[str, object]]) -> UserProfile:
 
         planned_count = record.get("planned_task_count")
         actual_count = record.get("actual_task_count")
+        if record.get("record_type") == "plan_outcome":
+            planned_tasks = record.get("planned_tasks", [])
+            completed_tasks = record.get("completed_tasks", [])
+            if isinstance(planned_tasks, list) and isinstance(completed_tasks, list):
+                planned_count = len(planned_tasks)
+                actual_count = len(completed_tasks)
         if isinstance(planned_count, (int, float)) and isinstance(actual_count, (int, float)):
             if planned_count > 0:
                 planned_counts.append(float(planned_count))
                 actual_counts.append(float(actual_count))
-                completion_rates.append(min(float(actual_count) / float(planned_count), 1.0))
+                stored_completion_rate = record.get("completion_rate")
+                if isinstance(stored_completion_rate, (int, float)):
+                    completion_rates.append(min(float(stored_completion_rate), 1.0))
+                else:
+                    completion_rates.append(min(float(actual_count) / float(planned_count), 1.0))
                 task_count_sessions += 1
                 if actual_count < planned_count:
                     overplanned_sessions += 1
@@ -754,6 +617,54 @@ class TaskPlanningEngine:
         }
 
     @staticmethod
+    def adjust_work_minutes_by_trend(
+        work_minutes: int,
+        outcome_trend: Optional[OutcomeTrend],
+    ) -> Dict[str, object]:
+        if not outcome_trend or outcome_trend.total_outcomes < 3:
+            return {
+                "work_minutes": work_minutes,
+                "adjustment_note": "No adaptive time adjustment; not enough outcome records yet.",
+            }
+
+        reduction = 0.0
+        reasons: List[str] = []
+        completion_rate = outcome_trend.recent_completion_rate
+        if completion_rate is not None and completion_rate < 0.5:
+            reduction += 0.25
+            reasons.append("recent completion rate is below 50%")
+        elif completion_rate is not None and completion_rate < 0.7:
+            reduction += 0.15
+            reasons.append("recent completion rate is below 70%")
+
+        if outcome_trend.average_fatigue is not None and outcome_trend.average_fatigue >= 4:
+            reduction += 0.10
+            reasons.append("recent fatigue is high")
+        if outcome_trend.average_interruptions is not None and outcome_trend.average_interruptions >= 3:
+            reduction += 0.05
+            reasons.append("recent interruptions are high")
+        if outcome_trend.average_task_switches is not None and outcome_trend.average_task_switches >= 5:
+            reduction += 0.05
+            reasons.append("recent task switching is high")
+
+        reduction = min(0.35, reduction)
+        if reduction <= 0:
+            return {
+                "work_minutes": work_minutes,
+                "adjustment_note": "No adaptive time adjustment; recent outcomes do not show strong overload.",
+            }
+
+        adjusted_minutes = max(1, round(work_minutes * (1 - reduction)))
+        return {
+            "work_minutes": adjusted_minutes,
+            "adjustment_note": (
+                f"Adaptive work budget reduced by {round(reduction * 100)}% because "
+                + ", ".join(reasons)
+                + "."
+            ),
+        }
+
+    @staticmethod
     def score_task(task: CandidateTask, available_minutes: int) -> ScoredTask:
         priority_score = task.importance * 0.6 + task.urgency * 0.4
         safe_estimate = max(1, task.estimated_minutes)
@@ -907,6 +818,7 @@ class TaskPlanningEngine:
         deferred_tasks: List[DeferredTask],
         work_minutes: int,
         capacity_estimate: CapacityEstimate,
+        trend_adjustment_note: str = "",
     ) -> List[str]:
         risks: List[str] = []
         if not candidate_tasks:
@@ -923,6 +835,8 @@ class TaskPlanningEngine:
         allocated_minutes = sum(item.allocated_minutes for item in selected_items)
         if work_minutes > 0 and allocated_minutes >= round(work_minutes * 0.9):
             risks.append("Selected workload is close to the available work budget.")
+        if trend_adjustment_note and "reduced" in trend_adjustment_note.lower():
+            risks.append(trend_adjustment_note)
 
         return risks or ["No major planning risks detected."]
 
@@ -948,10 +862,16 @@ class TaskPlanningEngine:
         available_minutes: int,
         candidate_tasks: List[CandidateTask],
         capacity_estimate: CapacityEstimate,
+        outcome_trend: Optional[OutcomeTrend] = None,
     ) -> TaskLevelPlan:
         buffer_info = cls.calculate_buffer(available_minutes)
-        work_minutes = buffer_info["work_minutes"]
+        initial_work_minutes = buffer_info["work_minutes"]
         buffer_minutes = buffer_info["buffer_minutes"]
+        trend_adjustment = cls.adjust_work_minutes_by_trend(
+            initial_work_minutes, outcome_trend
+        )
+        work_minutes = int(trend_adjustment["work_minutes"])
+        trend_adjustment_note = str(trend_adjustment["adjustment_note"])
         selection = cls.select_tasks(work_minutes, candidate_tasks, capacity_estimate)
         ordered_tasks = cls.order_tasks(selection.selected_tasks)
         selected_items = cls.allocate_time(ordered_tasks, work_minutes)
@@ -967,6 +887,7 @@ class TaskPlanningEngine:
             deferred_tasks,
             work_minutes,
             capacity_estimate,
+            trend_adjustment_note,
         )
         plan_confidence = cls._derive_plan_confidence(
             selected_items,
@@ -1007,6 +928,14 @@ def format_planning_recommendation(recommendation: PlanningRecommendation) -> st
 
 
 def generate_plan_report(task_level_plan: TaskLevelPlan) -> str:
+    return generate_plan_report_with_history(task_level_plan, "")
+
+
+def generate_plan_report_with_history(
+    task_level_plan: TaskLevelPlan,
+    history_summary: str,
+    llm_reflection: Optional[LLMReflection] = None,
+) -> str:
     selected_tasks = "\n".join(
         (
             f"{item.order}. {item.task_name} - {item.allocated_minutes} min"
@@ -1055,6 +984,148 @@ def generate_plan_report(task_level_plan: TaskLevelPlan) -> str:
 
 ## Planning Risks
 {planning_risks}
+
+## Historical Trend Summary
+{history_summary if history_summary else "No outcome trend is available yet."}
+
+## LLM Reflection Agent
+{format_llm_reflection(llm_reflection) if llm_reflection else "LLM reflection was not requested for this report."}
+"""
+
+
+def generate_history_trend_summary(history: List[Dict[str, object]]) -> str:
+    return format_outcome_trend(build_outcome_trend(history))
+
+
+def build_outcome_trend(history: List[Dict[str, object]], window: int = 5) -> OutcomeTrend:
+    outcome_records = [
+        record for record in history if record.get("record_type") == "plan_outcome"
+    ]
+    plan_records = [
+        record for record in history if record.get("record_type") == "task_level_plan"
+    ]
+    behavioral_records = [
+        record for record in history if record.get("record_type") not in {"plan_outcome", "task_level_plan"}
+    ]
+
+    if not outcome_records:
+        return OutcomeTrend(
+            total_records=len(history),
+            total_generated_plans=len(plan_records),
+            total_outcomes=0,
+            recent_completion_rate=None,
+            average_planned_minutes=None,
+            average_actual_minutes=None,
+            average_interruptions=None,
+            average_task_switches=None,
+            average_fatigue=None,
+            planning_adjustment="not enough outcome records",
+            risk_flags=["Outcome trend is unavailable until post-session feedback is recorded."],
+        )
+
+    recent_outcomes = outcome_records[-window:]
+    completion_rates = [
+        float(record.get("completion_rate", 0)) for record in recent_outcomes
+    ]
+    planned_minutes = [
+        float(record.get("planned_minutes", 0))
+        for record in recent_outcomes
+        if isinstance(record.get("planned_minutes"), (int, float))
+    ]
+    actual_minutes = [
+        float(record.get("actual_minutes", 0))
+        for record in recent_outcomes
+        if isinstance(record.get("actual_minutes"), (int, float))
+    ]
+    interruptions = [
+        float(record.get("interruption_count", 0))
+        for record in recent_outcomes
+        if isinstance(record.get("interruption_count"), (int, float))
+    ]
+    switches = [
+        float(record.get("task_switch_count", 0))
+        for record in recent_outcomes
+        if isinstance(record.get("task_switch_count"), (int, float))
+    ]
+    fatigue = [
+        float(record.get("fatigue_level", 0))
+        for record in recent_outcomes
+        if isinstance(record.get("fatigue_level"), (int, float))
+    ]
+
+    recent_completion = _mean(completion_rates)
+    average_interruptions = _mean(interruptions)
+    average_switches = _mean(switches)
+    average_fatigue = _mean(fatigue)
+    risk_flags: List[str] = []
+    if recent_completion is not None and recent_completion < 0.7:
+        risk_flags.append("Recent completion rate suggests overplanning risk.")
+    if average_interruptions is not None and average_interruptions >= 3:
+        risk_flags.append("Recent interruptions are high.")
+    if average_switches is not None and average_switches >= 5:
+        risk_flags.append("Recent task switching is high.")
+    if average_fatigue is not None and average_fatigue >= 4:
+        risk_flags.append("Recent fatigue is high.")
+
+    if len(outcome_records) < 3:
+        planning_adjustment = "observe only; fewer than three outcome records"
+    elif risk_flags:
+        planning_adjustment = "reduce future work budget conservatively"
+    else:
+        planning_adjustment = "maintain current planning budget"
+
+    return OutcomeTrend(
+        total_records=len(history),
+        total_generated_plans=len(plan_records),
+        total_outcomes=len(outcome_records),
+        recent_completion_rate=recent_completion,
+        average_planned_minutes=_mean(planned_minutes),
+        average_actual_minutes=_mean(actual_minutes),
+        average_interruptions=average_interruptions,
+        average_task_switches=average_switches,
+        average_fatigue=average_fatigue,
+        planning_adjustment=planning_adjustment,
+        risk_flags=risk_flags or ["No strong recent outcome risk detected."],
+    )
+
+
+def format_outcome_trend(outcome_trend: OutcomeTrend) -> str:
+    completion_text = (
+        "not enough data"
+        if outcome_trend.recent_completion_rate is None
+        else f"{outcome_trend.recent_completion_rate:.0%}"
+    )
+    lines = [
+        f"- Stored records: {outcome_trend.total_records}",
+        f"- Generated plans: {outcome_trend.total_generated_plans}",
+        f"- Recorded outcomes: {outcome_trend.total_outcomes}",
+        f"- Recent outcome completion rate: {completion_text}",
+        f"- Recent planned minutes: {_format_optional_number(outcome_trend.average_planned_minutes, ' min')}",
+        f"- Recent actual minutes: {_format_optional_number(outcome_trend.average_actual_minutes, ' min')}",
+        f"- Recent interruptions: {_format_optional_number(outcome_trend.average_interruptions)}",
+        f"- Recent task switches: {_format_optional_number(outcome_trend.average_task_switches)}",
+        f"- Recent fatigue level: {_format_optional_number(outcome_trend.average_fatigue, ' / 5')}",
+        f"- Planning adjustment: {outcome_trend.planning_adjustment}",
+        "- Risk flags:",
+        *[f"  - {flag}" for flag in outcome_trend.risk_flags],
+    ]
+    return "\n".join(lines)
+
+
+def generate_history_dashboard() -> str:
+    history = load_history(HISTORY_FILE)
+    trend = build_outcome_trend(history)
+    profile = build_user_profile(history)
+    return f"""# Planning History Dashboard
+
+## Outcome Trend
+{format_outcome_trend(trend)}
+
+## User Profile
+{format_user_profile(profile)}
+
+## Interpretation
+This dashboard uses saved local JSON records only. If there are fewer than three outcome records, adaptive planning remains conservative and the trend should be treated as preliminary.
 """
 
 
@@ -1082,6 +1153,10 @@ def build_plan_state(task_level_plan: TaskLevelPlan) -> Dict[str, object]:
         "plan_id": f"P{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "planned_tasks": [task.task_name for task in task_level_plan.selected_tasks],
         "planned_minutes": sum(task.allocated_minutes for task in task_level_plan.selected_tasks),
+        "available_minutes": task_level_plan.available_minutes,
+        "work_minutes": task_level_plan.work_minutes,
+        "buffer_minutes": task_level_plan.buffer_minutes,
+        "plan_confidence": task_level_plan.plan_confidence,
     }
 
 
@@ -1370,12 +1445,22 @@ def parse_candidate_tasks(task_rows: object) -> List[CandidateTask]:
     return parsed_tasks
 
 
-def planning_agent(available_minutes: int, candidate_tasks: object) -> str:
-    report, _plan_state = planning_agent_with_state(available_minutes, candidate_tasks)
+def planning_agent(
+    available_minutes: int,
+    candidate_tasks: object,
+    enable_llm_reflection: bool = True,
+) -> str:
+    report, _plan_state = planning_agent_with_state(
+        available_minutes, candidate_tasks, enable_llm_reflection
+    )
     return report
 
 
-def planning_agent_with_state(available_minutes: int, candidate_tasks: object) -> tuple:
+def planning_agent_with_state(
+    available_minutes: int,
+    candidate_tasks: object,
+    enable_llm_reflection: bool = True,
+) -> tuple:
     available_minutes = max(0, _coerce_int(available_minutes))
     tasks = parse_candidate_tasks(candidate_tasks)
     if not tasks:
@@ -1386,12 +1471,30 @@ def planning_agent_with_state(available_minutes: int, candidate_tasks: object) -
     planned_text = "; ".join(task.task_name for task in tasks)
     observation = ObservationLayer.collect(planned_text, "")
     capacity_estimate = CapacityEstimationEngine.estimate(profile, observation)
+    outcome_trend = build_outcome_trend(history)
     task_level_plan = TaskPlanningEngine.generate_task_level_plan(
         available_minutes,
         tasks,
         capacity_estimate,
+        outcome_trend,
     )
-    return generate_plan_report(task_level_plan), build_plan_state(task_level_plan)
+    plan_state = build_plan_state(task_level_plan)
+    history.append(task_level_plan.to_dict(str(plan_state["plan_id"])))
+    save_history(HISTORY_FILE, history)
+    history_summary = generate_history_trend_summary(history)
+    llm_reflection = LLMReflectionAgent.generate(
+        profile,
+        capacity_estimate,
+        outcome_trend,
+        task_level_plan,
+        enabled=enable_llm_reflection,
+    )
+    return (
+        generate_plan_report_with_history(
+            task_level_plan, history_summary, llm_reflection
+        ),
+        plan_state,
+    )
 
 
 def record_plan_outcome(
@@ -1481,6 +1584,11 @@ def create_demo() -> gr.Blocks:
                     precision=0,
                     scale=1,
                 )
+                enable_llm_reflection = gr.Checkbox(
+                    label="LLM reflection",
+                    value=True,
+                    scale=1,
+                )
                 generate_plan_button = gr.Button("Generate Plan", variant="primary", scale=1)
             task_table = gr.Dataframe(
                 headers=["task_name", "estimated_minutes", "importance", "urgency"],
@@ -1501,7 +1609,7 @@ def create_demo() -> gr.Blocks:
             plan_state = gr.State({})
             generate_plan_button.click(
                 fn=planning_agent_with_state,
-                inputs=[available_minutes, task_table],
+                inputs=[available_minutes, task_table, enable_llm_reflection],
                 outputs=[plan_report, plan_state],
             )
 
@@ -1554,6 +1662,15 @@ def create_demo() -> gr.Blocks:
                 ],
                 outputs=outcome_report,
             )
+
+            gr.Markdown("## History Dashboard")
+            history_button = gr.Button("Show History Summary", variant="secondary")
+            history_dashboard = gr.Markdown(label="Planning History Dashboard")
+            history_button.click(
+                fn=generate_history_dashboard,
+                inputs=[],
+                outputs=history_dashboard,
+            )
     return interface
 
 
@@ -1561,4 +1678,7 @@ demo = create_demo()
 
 
 if __name__ == "__main__":
-    demo.launch(css=load_css(), server_port=find_available_port())
+    try:
+        demo.launch(css=load_css(), server_port=find_available_port())
+    except OSError:
+        demo.launch(css=load_css())

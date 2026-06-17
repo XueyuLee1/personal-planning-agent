@@ -10,9 +10,9 @@ from typing import List
 def load_history(file_path: str) -> list:
     """Load session history from disk, falling back to an empty list.
 
-    New session records contain structured planning fields, while older records
-    may contain only score and patterns. Both formats are kept for backward
-    compatibility.
+    History can contain behavioral sessions, generated task-level plans, and
+    post-session outcome records. Older records may contain only score and
+    patterns. These formats are kept for backward compatibility.
     Corrupted or non-list files are treated as empty memory so the app can keep
     running during a demo.
     """
@@ -33,9 +33,13 @@ def load_history(file_path: str) -> list:
     for record in history:
         if not isinstance(record, dict):
             continue
-        if "score" not in record or "patterns" not in record:
+        record_type = record.get("record_type")
+        if record_type == "task_level_plan":
+            if "plan_id" in record and "patterns" in record:
+                valid_records.append(record)
             continue
-        valid_records.append(record)
+        if "score" in record and "patterns" in record:
+            valid_records.append(record)
     return valid_records
 
 
